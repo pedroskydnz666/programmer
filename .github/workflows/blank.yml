@@ -39,12 +39,7 @@ jobs:
           if [ -n "${{ secrets.SSH_PASSWORD }}" ]; then
             PASS="${{ secrets.SSH_PASSWORD }}"
           else
-            PASS="$(python3 - <<'PY'
-import secrets, string
-a = string.ascii_letters + string.digits + "@#$%^&*()_+=-{}[]:;,.?"
-print(''.join(secrets.choice(a) for _ in range(28)))
-PY
-)"
+            PASS="$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits+"@#$%^&*()_+=-{}[]:;,.?"; print("".join(secrets.choice(a) for _ in range(28)))')"
           fi
 
           sudo apt-get update
@@ -54,18 +49,16 @@ PY
           echo "$USER:$PASS" | sudo chpasswd
           sudo usermod -aG sudo "$USER" || true
 
-          # Evita override por sshd_config.d
           sudo tee /etc/ssh/sshd_config.d/99-gh-actions.conf >/dev/null <<'EOF'
-PasswordAuthentication yes
-KbdInteractiveAuthentication yes
-UsePAM yes
-PermitRootLogin no
+          PasswordAuthentication yes
+          KbdInteractiveAuthentication yes
+          UsePAM yes
+          PermitRootLogin no
 EOF
 
           sudo systemctl enable --now ssh || true
           sudo systemctl restart ssh || true
 
-          # UFW: libera 22 e explicitamente na interface tailscale0
           sudo ufw allow 22/tcp || true
           sudo ufw --force enable || true
           sudo ufw allow in on tailscale0 to any port 22 proto tcp || true
