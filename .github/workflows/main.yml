@@ -105,14 +105,14 @@ jobs:
           done
 
           if ! tailscale status --json 2>/dev/null | jq -e '.Self.Online == true' >/dev/null; then
-            echo "ERRO: Nó Tailscale não ficou Online."
+            echo "ERRO: No Tailscale nao ficou Online."
             tailscale status || true
             exit 1
           fi
 
           TSIP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
           if [ -z "$TSIP" ]; then
-            echo "ERRO: Tailscale online mas sem IPv4 atribuído."
+            echo "ERRO: Tailscale online mas sem IPv4 atribuido."
             exit 1
           fi
 
@@ -123,7 +123,7 @@ jobs:
         run: |
           echo ""
           echo "========================================="
-          echo "             SSH ACCESS INFO"
+          echo "           SSH ACCESS INFO"
           echo "========================================="
           echo "Host: $TAILSCALE_IP"
           echo "User: $SSH_USER"
@@ -131,23 +131,51 @@ jobs:
           echo "Cmd:  ssh $SSH_USER@$TAILSCALE_IP"
           echo "========================================="
 
-      - name: Install tmate + Start tmate -F
+      - name: Install tmate
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get install -y tmate
           tmate -V
 
-          echo "Iniciando tmate -F ..."
-          tmate -F 2>&1 | while IFS= read -r line; do
-            echo "$line"
-            if echo "$line" | grep -qE 'ssh session:|web session:'; then
-              echo ""
-              echo "========================================="
-              echo "           TMATE ACCESS INFO"
-              echo "========================================="
-              echo "$line"
-              echo "========================================="
-              echo ""
-            fi
+      - name: Start tmate + Show URLs + Keep alive
+        shell: bash
+        run: |
+          set +e
+
+          # Inicia tmate com socket nomeado (funciona sem TTY no CI)
+          tmate -S /tmp/tmate.sock new-session -d -s main
+
+          # Aguarda o tmate conectar ao servidor e estar pronto
+          tmate -S /tmp/tmate.sock wait tmate-ready
+
+          # Captura as URLs
+          TMATE_SSH="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          TMATE_WEB="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          TMATE_SSH_RO="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh_ro}')"
+          TMATE_WEB_RO="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web_ro}')"
+
+          echo ""
+          echo "========================================="
+          echo "          TMATE ACCESS INFO"
+          echo "========================================="
+          echo "SSH  (rw): $TMATE_SSH"
+          echo "Web  (rw): $TMATE_WEB"
+          echo "SSH  (ro): $TMATE_SSH_RO"
+          echo "Web  (ro): $TMATE_WEB_RO"
+          echo "========================================="
+          echo ""
+          echo "SSH direto (Tailscale):"
+          echo "  ssh $SSH_USER@$TAILSCALE_IP"
+          echo "  Senha: $SSH_PASS"
+          echo "========================================="
+          echo ""
+
+          # Mantém o runner vivo e repete as URLs a cada minuto
+          while true; do
+            sleep 60
+            echo "[$(date)] Alive"
+            echo "  tmate SSH : $TMATE_SSH"
+            echo "  tmate Web : $TMATE_WEB"
+            echo "  TS SSH    : ssh $SSH_USER@$TAILSCALE_IP"
           done
