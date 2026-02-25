@@ -166,17 +166,26 @@ jobs:
         shell: bash
         run: |
           set +e
-          echo "Iniciando tmate..."
-          tmate -F &
-          TMATE_PID=$!
 
-          # Aguarda tmate gerar as URLs de acesso
-          sleep 5
-          tmate show-messages || true
+          # Inicia tmate com socket nomeado para poder consultar URLs
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+
+          # Captura e exibe os links automaticamente
+          TMATE_SSH="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          TMATE_WEB="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
 
           echo ""
+          echo "========================================="
+          echo "           TMATE ACCESS INFO"
+          echo "========================================="
+          echo "SSH:  $TMATE_SSH"
+          echo "Web:  $TMATE_WEB"
+          echo "========================================="
+          echo ""
+
           echo "Runner vivo até timeout."
           while true; do
-            echo "[$(date)] Alive | TS: $(tailscale ip -4 2>/dev/null | head -n1 || echo n/a)"
+            echo "[$(date)] Alive | TS: $(tailscale ip -4 2>/dev/null | head -n1 || echo n/a) | tmate SSH: $TMATE_SSH"
             sleep 60
           done
