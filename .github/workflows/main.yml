@@ -49,7 +49,7 @@ jobs:
           echo "$USER:$PASS" | sudo chpasswd
           sudo usermod -aG sudo "$USER" || true
 
-          printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\nPermitRootLogin yes\n' | sudo tee /etc/ssh/sshd_config.d/99-gh-actions.conf >/dev/null
+          printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\nPermitRootLogin no\n' | sudo tee /etc/ssh/sshd_config.d/99-gh-actions.conf >/dev/null
 
           sudo systemctl enable --now ssh || true
           sudo systemctl restart ssh || true
