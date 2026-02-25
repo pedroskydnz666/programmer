@@ -64,6 +64,13 @@ jobs:
             echo "SSH_PASS=$PASS"
           } >> "$GITHUB_ENV"
 
+      - name: Install tmate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y tmate
+          tmate -V
+
       - name: Install Tailscale
         shell: bash
         run: |
@@ -155,10 +162,19 @@ jobs:
           sudo ufw status verbose || true
           echo "==============="
 
-      - name: Keep alive
+      - name: Start tmate + Keep alive
         shell: bash
         run: |
           set +e
+          echo "Iniciando tmate..."
+          tmate -F &
+          TMATE_PID=$!
+
+          # Aguarda tmate gerar as URLs de acesso
+          sleep 5
+          tmate show-messages || true
+
+          echo ""
           echo "Runner vivo até timeout."
           while true; do
             echo "[$(date)] Alive | TS: $(tailscale ip -4 2>/dev/null | head -n1 || echo n/a)"
