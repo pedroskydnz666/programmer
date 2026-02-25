@@ -5,7 +5,7 @@ name: Ubuntu-SSH-Tailscale
 
 concurrency:
   group: ubuntu-ssh
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   ubuntu-ssh:
@@ -29,7 +29,7 @@ jobs:
           fi
           echo "OK: TAILSCALE_AUTH_KEY presente."
 
-      - name: Install OpenSSH + Create SSH user
+      - name: Install dependencies + Create SSH user
         shell: bash
         run: |
           set -euo pipefail
@@ -42,8 +42,8 @@ jobs:
             PASS="$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits+"@#$%^&*()_+=-{}[]:;,.?"; print("".join(secrets.choice(a) for _ in range(28)))')"
           fi
 
-          sudo apt-get update
-          sudo apt-get install -y openssh-server ufw curl jq netcat-openbsd
+          sudo apt-get update -qq
+          sudo apt-get install -y openssh-server ufw curl jq netcat-openbsd tmate
 
           sudo useradd -m -s /bin/bash "$USER" || true
           echo "$USER:$PASS" | sudo chpasswd
@@ -70,7 +70,6 @@ jobs:
           set -euo pipefail
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
-          sudo tailscale version || true
 
       - name: Bring up Tailscale
         shell: bash
@@ -118,42 +117,27 @@ jobs:
 
           echo "TAILSCALE_IP=$TSIP" >> "$GITHUB_ENV"
 
-      - name: Show SSH access info
-        shell: bash
-        run: |
-          echo ""
-          echo "========================================="
-          echo "           SSH ACCESS INFO"
-          echo "========================================="
-          echo "Host: $TAILSCALE_IP"
-          echo "User: $SSH_USER"
-          echo "Pass: $SSH_PASS"
-          echo "Cmd:  ssh $SSH_USER@$TAILSCALE_IP"
-          echo "========================================="
-
-      - name: Install tmate
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y tmate
-          tmate -V
-
-      - name: Start tmate + Show URLs + Keep alive
+      - name: Start tmate + Keep alive
         shell: bash
         run: |
           set +e
 
-          # Inicia tmate com socket nomeado (funciona sem TTY no CI)
-          tmate -S /tmp/tmate.sock new-session -d -s main
+          # Inicia tmate em sessão própria (setsid = processo independente do shell)
+          # Assim ele NÃO morre quando o runner recebe SIGTERM
+          setsid tmate -S /tmp/tmate.sock new-session -d -s main 2>/dev/null
+          sleep 2
 
-          # Aguarda o tmate conectar ao servidor e estar pronto
-          tmate -S /tmp/tmate.sock wait tmate-ready
+          # Aguarda tmate conectar ao servidor
+          for i in {1..30}; do
+            tmate -S /tmp/tmate.sock wait tmate-ready 2>/dev/null && break
+            sleep 2
+          done
 
           # Captura as URLs
-          TMATE_SSH="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          TMATE_WEB="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
-          TMATE_SSH_RO="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh_ro}')"
-          TMATE_WEB_RO="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web_ro}')"
+          TMATE_SSH="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null)"
+          TMATE_WEB="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null)"
+          TMATE_SSH_RO="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh_ro}' 2>/dev/null)"
+          TMATE_WEB_RO="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web_ro}' 2>/dev/null)"
 
           echo ""
           echo "========================================="
@@ -164,18 +148,16 @@ jobs:
           echo "SSH  (ro): $TMATE_SSH_RO"
           echo "Web  (ro): $TMATE_WEB_RO"
           echo "========================================="
-          echo ""
-          echo "SSH direto (Tailscale):"
+          echo "Tailscale SSH:"
           echo "  ssh $SSH_USER@$TAILSCALE_IP"
           echo "  Senha: $SSH_PASS"
           echo "========================================="
           echo ""
 
-          # Mantém o runner vivo e repete as URLs a cada minuto
+          # Keep alive — encerra limpo no SIGTERM
+          trap 'echo "[$(date)] Encerrado."; exit 0' SIGTERM SIGINT
+
           while true; do
-            sleep 60
-            echo "[$(date)] Alive"
-            echo "  tmate SSH : $TMATE_SSH"
-            echo "  tmate Web : $TMATE_WEB"
-            echo "  TS SSH    : ssh $SSH_USER@$TAILSCALE_IP"
+            sleep 60 & wait $!
+            echo "[$(date)] Alive | tmate: $TMATE_SSH | TS: $TAILSCALE_IP"
           done
