@@ -29,7 +29,7 @@ jobs:
           fi
           echo "OK: TAILSCALE_AUTH_KEY presente."
 
-      - name: Install OpenSSH + Create SSH user (robusto)
+      - name: Install OpenSSH + Create SSH user
         shell: bash
         run: |
           set -euo pipefail
@@ -49,7 +49,7 @@ jobs:
           echo "$USER:$PASS" | sudo chpasswd
           sudo usermod -aG sudo "$USER" || true
 
-          printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\nPermitRootLogin no\n' | sudo tee /etc/ssh/sshd_config.d/99-gh-actions.conf >/dev/null
+          printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\nPermitRootLogin yes\n' | sudo tee /etc/ssh/sshd_config.d/99-gh-actions.conf >/dev/null
 
           sudo systemctl enable --now ssh || true
           sudo systemctl restart ssh || true
@@ -64,13 +64,6 @@ jobs:
             echo "SSH_PASS=$PASS"
           } >> "$GITHUB_ENV"
 
-      - name: Install tmate
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y tmate
-          tmate -V
-
       - name: Install Tailscale
         shell: bash
         run: |
@@ -79,7 +72,7 @@ jobs:
           sudo systemctl enable --now tailscaled
           sudo tailscale version || true
 
-      - name: Bring up Tailscale (sem prompt / valida online)
+      - name: Bring up Tailscale
         shell: bash
         run: |
           set -euo pipefail
@@ -112,80 +105,49 @@ jobs:
           done
 
           if ! tailscale status --json 2>/dev/null | jq -e '.Self.Online == true' >/dev/null; then
-            echo "ERRO: Nó Tailscale não ficou Online (provável approval/ACL/key inválida)."
+            echo "ERRO: Nó Tailscale não ficou Online."
             tailscale status || true
-            tailscale status --json || true
             exit 1
           fi
 
           TSIP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
           if [ -z "$TSIP" ]; then
             echo "ERRO: Tailscale online mas sem IPv4 atribuído."
-            tailscale status || true
             exit 1
           fi
 
           echo "TAILSCALE_IP=$TSIP" >> "$GITHUB_ENV"
 
-      - name: Show access info + DIAG completo
+      - name: Show SSH access info
         shell: bash
         run: |
-          set -euo pipefail
-
           echo ""
-          echo "=== SSH ACCESS ==="
+          echo "========================================="
+          echo "             SSH ACCESS INFO"
+          echo "========================================="
           echo "Host: $TAILSCALE_IP"
           echo "User: $SSH_USER"
           echo "Pass: $SSH_PASS"
-          echo ""
-          echo "Comando:"
-          echo "ssh $SSH_USER@$TAILSCALE_IP"
-          echo "==============="
-          echo ""
+          echo "Cmd:  ssh $SSH_USER@$TAILSCALE_IP"
+          echo "========================================="
 
-          echo "=== DIAG SSH/TS ==="
-          echo "--- tailscale status ---"
-          tailscale status || true
-          echo "--- tailscale status --json (resumo) ---"
-          tailscale status --json | jq '{BackendState: .BackendState, Self: .Self}' || true
-
-          echo "--- ssh status ---"
-          sudo systemctl --no-pager -l status ssh || true
-
-          echo "--- portas ---"
-          sudo ss -lntp | grep -E ':(22)\b' || true
-
-          echo "--- sshd -T (auth) ---"
-          sudo sshd -T | egrep -i 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin|usepam|listenaddress' || true
-
-          echo "--- ufw ---"
-          sudo ufw status verbose || true
-          echo "==============="
-
-      - name: Start tmate + Keep alive
+      - name: Install tmate + Start tmate -F
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
+          sudo apt-get install -y tmate
+          tmate -V
 
-          # Inicia tmate com socket nomeado para poder consultar URLs
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-
-          # Captura e exibe os links automaticamente
-          TMATE_SSH="$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          TMATE_WEB="$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
-
-          echo ""
-          echo "========================================="
-          echo "           TMATE ACCESS INFO"
-          echo "========================================="
-          echo "SSH:  $TMATE_SSH"
-          echo "Web:  $TMATE_WEB"
-          echo "========================================="
-          echo ""
-
-          echo "Runner vivo até timeout."
-          while true; do
-            echo "[$(date)] Alive | TS: $(tailscale ip -4 2>/dev/null | head -n1 || echo n/a) | tmate SSH: $TMATE_SSH"
-            sleep 60
+          echo "Iniciando tmate -F ..."
+          tmate -F 2>&1 | while IFS= read -r line; do
+            echo "$line"
+            if echo "$line" | grep -qE 'ssh session:|web session:'; then
+              echo ""
+              echo "========================================="
+              echo "           TMATE ACCESS INFO"
+              echo "========================================="
+              echo "$line"
+              echo "========================================="
+              echo ""
+            fi
           done
