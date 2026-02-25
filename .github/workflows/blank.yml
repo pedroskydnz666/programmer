@@ -1,113 +1,178 @@
-name: RDP
+name: Ubuntu-SSH-Tailscale
 
-on:
+"on":
   workflow_dispatch:
 
+concurrency:
+  group: ubuntu-ssh
+  cancel-in-progress: true
+
 jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+  ubuntu-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Sanity check
+        shell: bash
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          set -e
+          uname -a
+          cat /etc/os-release
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
+      - name: Check required secrets
+        shell: bash
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          if [ -z "${{ secrets.TAILSCALE_AUTH_KEY }}" ]; then
+            echo "ERRO: Secret TAILSCALE_AUTH_KEY ausente/vazio."
+            exit 1
+          fi
+          echo "OK: TAILSCALE_AUTH_KEY presente."
+
+      - name: Install OpenSSH + Create SSH user (robusto)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          USER="sshuser"
+
+          if [ -n "${{ secrets.SSH_PASSWORD }}" ]; then
+            PASS="${{ secrets.SSH_PASSWORD }}"
+          else
+            PASS="$(python3 - <<'PY'
+import secrets, string
+a = string.ascii_letters + string.digits + "@#$%^&*()_+=-{}[]:;,.?"
+print(''.join(secrets.choice(a) for _ in range(28)))
+PY
+)"
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-server ufw curl jq netcat-openbsd
+
+          sudo useradd -m -s /bin/bash "$USER" || true
+          echo "$USER:$PASS" | sudo chpasswd
+          sudo usermod -aG sudo "$USER" || true
+
+          # Evita override por sshd_config.d
+          sudo tee /etc/ssh/sshd_config.d/99-gh-actions.conf >/dev/null <<'EOF'
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+PermitRootLogin no
+EOF
+
+          sudo systemctl enable --now ssh || true
+          sudo systemctl restart ssh || true
+
+          # UFW: libera 22 e explicitamente na interface tailscale0
+          sudo ufw allow 22/tcp || true
+          sudo ufw --force enable || true
+          sudo ufw allow in on tailscale0 to any port 22 proto tcp || true
+          sudo ufw reload || true
+
+          {
+            echo "SSH_USER=$USER"
+            echo "SSH_PASS=$PASS"
+          } >> "$GITHUB_ENV"
 
       - name: Install Tailscale
+        shell: bash
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable --now tailscaled
+          sudo tailscale version || true
 
-      - name: Establish Tailscale Connection
+      - name: Bring up Tailscale (sem prompt / valida online)
+        shell: bash
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          set -euo pipefail
 
-      - name: Maintain Connection
+          TS_AUTHKEY="$(printf '%s' "${{ secrets.TAILSCALE_AUTH_KEY }}" | tr -d '\r\n')"
+          TS_TAG="$(printf '%s' "${{ secrets.TAILSCALE_TAG }}" | tr -d '\r\n')"
+
+          if [ -n "$TS_TAG" ]; then
+            sudo tailscale up \
+              --reset \
+              --authkey="$TS_AUTHKEY" \
+              --hostname="gh-ubuntu-${{ github.run_id }}" \
+              --accept-dns=false \
+              --ssh \
+              --advertise-tags="$TS_TAG"
+          else
+            sudo tailscale up \
+              --reset \
+              --authkey="$TS_AUTHKEY" \
+              --hostname="gh-ubuntu-${{ github.run_id }}" \
+              --accept-dns=false \
+              --ssh
+          fi
+
+          for i in {1..40}; do
+            if tailscale status --json 2>/dev/null | jq -e '.Self.Online == true' >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! tailscale status --json 2>/dev/null | jq -e '.Self.Online == true' >/dev/null; then
+            echo "ERRO: Nó Tailscale não ficou Online (provável approval/ACL/key inválida)."
+            tailscale status || true
+            tailscale status --json || true
+            exit 1
+          fi
+
+          TSIP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+          if [ -z "$TSIP" ]; then
+            echo "ERRO: Tailscale online mas sem IPv4 atribuído."
+            tailscale status || true
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TSIP" >> "$GITHUB_ENV"
+
+      - name: Show access info + DIAG completo
+        shell: bash
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
+          set -euo pipefail
+
+          echo ""
+          echo "=== SSH ACCESS ==="
+          echo "Host: $TAILSCALE_IP"
+          echo "User: $SSH_USER"
+          echo "Pass: $SSH_PASS"
+          echo ""
+          echo "Comando:"
+          echo "ssh $SSH_USER@$TAILSCALE_IP"
+          echo "==============="
+          echo ""
+
+          echo "=== DIAG SSH/TS ==="
+          echo "--- tailscale status ---"
+          tailscale status || true
+          echo "--- tailscale status --json (resumo) ---"
+          tailscale status --json | jq '{BackendState: .BackendState, Self: .Self}' || true
+
+          echo "--- ssh status ---"
+          sudo systemctl --no-pager -l status ssh || true
+
+          echo "--- portas ---"
+          sudo ss -lntp | grep -E ':(22)\b' || true
+
+          echo "--- sshd -T (auth) ---"
+          sudo sshd -T | egrep -i 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin|usepam|listenaddress' || true
+
+          echo "--- ufw ---"
+          sudo ufw status verbose || true
+          echo "==============="
+
+      - name: Keep alive
+        shell: bash
+        run: |
+          set +e
+          echo "Runner vivo até timeout."
+          while true; do
+            echo "[$(date)] Alive | TS: $(tailscale ip -4 2>/dev/null | head -n1 || echo n/a)"
+            sleep 60
+          done
